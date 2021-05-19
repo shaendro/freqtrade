@@ -560,7 +560,7 @@ class IStrategy(ABC, HyperStrategyMixin):
                 and current_profit <= ask_strategy.get('sell_profit_offset', 0)):
             # sell_profit_only and profit doesn't reach the offset - ignore sell signal
             pass
-        elif ask_strategy.get('use_sell_signal', True) and not buy:
+        elif ask_strategy.get('use_sell_signal', True):
             if sell:
                 sell_signal = SellType.SELL_SIGNAL
             else:
