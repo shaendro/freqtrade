@@ -1,9 +1,6 @@
 # pragma pylint: disable=missing-docstring,W0212,C0103
-import logging
-import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
 from unittest.mock import ANY, MagicMock
 
 import pandas as pd
@@ -25,13 +22,7 @@ from freqtrade.strategy.hyper import IntParameter
 from tests.conftest import (get_args, log_has, log_has_re, patch_exchange,
                             patched_configuration_load_config_file)
 
-from .hyperopts.default_hyperopt import DefaultHyperOpt
-
-
-# Functions for recurrent object patching
-def create_results() -> List[Dict]:
-
-    return [{'loss': 1, 'result': 'foo', 'params': {}, 'is_best': True}]
+from .hyperopts.hyperopt_test_sep_file import HyperoptTestSepFile
 
 
 def test_setup_hyperopt_configuration_without_arguments(mocker, default_conf, caplog) -> None:
@@ -40,7 +31,7 @@ def test_setup_hyperopt_configuration_without_arguments(mocker, default_conf, ca
     args = [
         'hyperopt',
         '--config', 'config.json',
-        '--hyperopt', 'DefaultHyperOpt',
+        '--hyperopt', 'HyperoptTestSepFile',
     ]
 
     config = setup_optimize_configuration(get_args(args), RunMode.HYPEROPT)
@@ -72,7 +63,7 @@ def test_setup_hyperopt_configuration_with_arguments(mocker, default_conf, caplo
     args = [
         'hyperopt',
         '--config', 'config.json',
-        '--hyperopt', 'DefaultHyperOpt',
+        '--hyperopt', 'HyperoptTestSepFile',
         '--datadir', '/foo/bar',
         '--timeframe', '1m',
         '--timerange', ':100',
@@ -124,7 +115,7 @@ def test_setup_hyperopt_configuration_stake_amount(mocker, default_conf) -> None
     args = [
         'hyperopt',
         '--config', 'config.json',
-        '--hyperopt', 'DefaultHyperOpt',
+        '--hyperopt', 'HyperoptTestSepFile',
         '--stake-amount', '1',
         '--starting-balance', '2'
     ]
@@ -134,7 +125,7 @@ def test_setup_hyperopt_configuration_stake_amount(mocker, default_conf) -> None
     args = [
         'hyperopt',
         '--config', 'config.json',
-        '--strategy', 'DefaultStrategy',
+        '--strategy', 'StrategyTestV2',
         '--stake-amount', '1',
         '--starting-balance', '0.5'
     ]
@@ -145,7 +136,7 @@ def test_setup_hyperopt_configuration_stake_amount(mocker, default_conf) -> None
 def test_hyperoptresolver(mocker, default_conf, caplog) -> None:
     patched_configuration_load_config_file(mocker, default_conf)
 
-    hyperopt = DefaultHyperOpt
+    hyperopt = HyperoptTestSepFile
     delattr(hyperopt, 'populate_indicators')
     delattr(hyperopt, 'populate_buy_trend')
     delattr(hyperopt, 'populate_sell_trend')
@@ -153,7 +144,7 @@ def test_hyperoptresolver(mocker, default_conf, caplog) -> None:
         'freqtrade.resolvers.hyperopt_resolver.HyperOptResolver.load_object',
         MagicMock(return_value=hyperopt(default_conf))
     )
-    default_conf.update({'hyperopt': 'DefaultHyperOpt'})
+    default_conf.update({'hyperopt': 'HyperoptTestSepFile'})
     x = HyperOptResolver.load_hyperopt(default_conf)
     assert not hasattr(x, 'populate_indicators')
     assert not hasattr(x, 'populate_buy_trend')
@@ -193,7 +184,7 @@ def test_start_not_installed(mocker, default_conf, import_fails) -> None:
     args = [
         'hyperopt',
         '--config', 'config.json',
-        '--hyperopt', 'DefaultHyperOpt',
+        '--hyperopt', 'HyperoptTestSepFile',
         '--hyperopt-path',
         str(Path(__file__).parent / "hyperopts"),
         '--epochs', '5',
@@ -214,7 +205,7 @@ def test_start(mocker, hyperopt_conf, caplog) -> None:
     args = [
         'hyperopt',
         '--config', 'config.json',
-        '--hyperopt', 'DefaultHyperOpt',
+        '--hyperopt', 'HyperoptTestSepFile',
         '--hyperopt-loss', 'SharpeHyperOptLossDaily',
         '--epochs', '5'
     ]
@@ -238,7 +229,7 @@ def test_start_no_data(mocker, hyperopt_conf) -> None:
     args = [
         'hyperopt',
         '--config', 'config.json',
-        '--hyperopt', 'DefaultHyperOpt',
+        '--hyperopt', 'HyperoptTestSepFile',
         '--hyperopt-loss', 'SharpeHyperOptLossDaily',
         '--epochs', '5'
     ]
@@ -256,7 +247,7 @@ def test_start_filelock(mocker, hyperopt_conf, caplog) -> None:
     args = [
         'hyperopt',
         '--config', 'config.json',
-        '--hyperopt', 'DefaultHyperOpt',
+        '--hyperopt', 'HyperoptTestSepFile',
         '--hyperopt-loss', 'SharpeHyperOptLossDaily',
         '--epochs', '5'
     ]
@@ -303,52 +294,6 @@ def test_no_log_if_loss_does_not_improve(hyperopt, caplog) -> None:
     assert caplog.record_tuples == []
 
 
-def test_save_results_saves_epochs(mocker, hyperopt, tmpdir, caplog) -> None:
-    # Test writing to temp dir and reading again
-    epochs = create_results()
-    hyperopt.results_file = Path(tmpdir / 'ut_results.fthypt')
-
-    caplog.set_level(logging.DEBUG)
-
-    for epoch in epochs:
-        hyperopt._save_result(epoch)
-    assert log_has(f"1 epoch saved to '{hyperopt.results_file}'.", caplog)
-
-    hyperopt._save_result(epochs[0])
-    assert log_has(f"2 epochs saved to '{hyperopt.results_file}'.", caplog)
-
-    hyperopt_epochs = HyperoptTools.load_previous_results(hyperopt.results_file)
-    assert len(hyperopt_epochs) == 2
-
-
-def test_load_previous_results(testdatadir, caplog) -> None:
-
-    results_file = testdatadir / 'hyperopt_results_SampleStrategy.pickle'
-
-    hyperopt_epochs = HyperoptTools.load_previous_results(results_file)
-
-    assert len(hyperopt_epochs) == 5
-    assert log_has_re(r"Reading pickled epochs from .*", caplog)
-
-    caplog.clear()
-
-    # Modern version
-    results_file = testdatadir / 'strategy_SampleStrategy.fthypt'
-
-    hyperopt_epochs = HyperoptTools.load_previous_results(results_file)
-
-    assert len(hyperopt_epochs) == 5
-    assert log_has_re(r"Reading epochs from .*", caplog)
-
-
-def test_load_previous_results2(mocker, testdatadir, caplog) -> None:
-    mocker.patch('freqtrade.optimize.hyperopt_tools.HyperoptTools._read_results_pickle',
-                 return_value=[{'asdf': '222'}])
-    results_file = testdatadir / 'hyperopt_results_SampleStrategy.pickle'
-    with pytest.raises(OperationalException, match=r"The file .* incompatible.*"):
-        HyperoptTools.load_previous_results(results_file)
-
-
 def test_roi_table_generation(hyperopt) -> None:
     params = {
         'roi_t1': 5,
@@ -360,6 +305,18 @@ def test_roi_table_generation(hyperopt) -> None:
     }
 
     assert hyperopt.custom_hyperopt.generate_roi_table(params) == {0: 6, 15: 3, 25: 1, 30: 0}
+
+
+def test_params_no_optimize_details(hyperopt) -> None:
+    hyperopt.config['spaces'] = ['buy']
+    res = hyperopt._get_no_optimize_details()
+    assert isinstance(res, dict)
+    assert "trailing" in res
+    assert res["trailing"]['trailing_stop'] is False
+    assert "roi" in res
+    assert res['roi']['0'] == 0.04
+    assert "stoploss" in res
+    assert res['stoploss']['stoploss'] == -0.1
 
 
 def test_start_calls_optimizer(mocker, hyperopt_conf, capsys) -> None:
@@ -394,7 +351,7 @@ def test_start_calls_optimizer(mocker, hyperopt_conf, capsys) -> None:
     del hyperopt_conf['timeframe']
 
     hyperopt = Hyperopt(hyperopt_conf)
-    hyperopt.backtesting.strategy.ohlcvdata_to_dataframe = MagicMock()
+    hyperopt.backtesting.strategy.advise_all_indicators = MagicMock()
     hyperopt.custom_hyperopt.generate_roi_table = MagicMock(return_value={})
 
     hyperopt.start()
@@ -442,7 +399,7 @@ def test_hyperopt_format_results(hyperopt):
         'rejected_signals': 2,
         'backtest_start_time': 1619718665,
         'backtest_end_time': 1619718665,
-        }
+    }
     results_metrics = generate_strategy_stats({'XRP/BTC': None}, '', bt_result,
                                               Arrow(2017, 11, 14, 19, 32, 00),
                                               Arrow(2017, 12, 14, 19, 32, 00), market_change=0)
@@ -467,43 +424,9 @@ def test_hyperopt_format_results(hyperopt):
     assert '0:50:00 min' in result
 
 
-@pytest.mark.parametrize("spaces, expected_results", [
-    (['buy'],
-     {'buy': True, 'sell': False, 'roi': False, 'stoploss': False, 'trailing': False}),
-    (['sell'],
-     {'buy': False, 'sell': True, 'roi': False, 'stoploss': False, 'trailing': False}),
-    (['roi'],
-     {'buy': False, 'sell': False, 'roi': True, 'stoploss': False, 'trailing': False}),
-    (['stoploss'],
-     {'buy': False, 'sell': False, 'roi': False, 'stoploss': True, 'trailing': False}),
-    (['trailing'],
-     {'buy': False, 'sell': False, 'roi': False, 'stoploss': False, 'trailing': True}),
-    (['buy', 'sell', 'roi', 'stoploss'],
-     {'buy': True, 'sell': True, 'roi': True, 'stoploss': True, 'trailing': False}),
-    (['buy', 'sell', 'roi', 'stoploss', 'trailing'],
-     {'buy': True, 'sell': True, 'roi': True, 'stoploss': True, 'trailing': True}),
-    (['buy', 'roi'],
-     {'buy': True, 'sell': False, 'roi': True, 'stoploss': False, 'trailing': False}),
-    (['all'],
-     {'buy': True, 'sell': True, 'roi': True, 'stoploss': True, 'trailing': True}),
-    (['default'],
-     {'buy': True, 'sell': True, 'roi': True, 'stoploss': True, 'trailing': False}),
-    (['default', 'trailing'],
-     {'buy': True, 'sell': True, 'roi': True, 'stoploss': True, 'trailing': True}),
-    (['all', 'buy'],
-     {'buy': True, 'sell': True, 'roi': True, 'stoploss': True, 'trailing': True}),
-    (['default', 'buy'],
-     {'buy': True, 'sell': True, 'roi': True, 'stoploss': True, 'trailing': False}),
-])
-def test_has_space(hyperopt_conf, spaces, expected_results):
-    for s in ['buy', 'sell', 'roi', 'stoploss', 'trailing']:
-        hyperopt_conf.update({'spaces': spaces})
-        assert HyperoptTools.has_space(hyperopt_conf, s) == expected_results[s]
-
-
 def test_populate_indicators(hyperopt, testdatadir) -> None:
     data = load_data(testdatadir, '1m', ['UNITTEST/BTC'], fill_up_missing=True)
-    dataframes = hyperopt.backtesting.strategy.ohlcvdata_to_dataframe(data)
+    dataframes = hyperopt.backtesting.strategy.advise_all_indicators(data)
     dataframe = hyperopt.custom_hyperopt.populate_indicators(dataframes['UNITTEST/BTC'],
                                                              {'pair': 'UNITTEST/BTC'})
 
@@ -515,7 +438,7 @@ def test_populate_indicators(hyperopt, testdatadir) -> None:
 
 def test_buy_strategy_generator(hyperopt, testdatadir) -> None:
     data = load_data(testdatadir, '1m', ['UNITTEST/BTC'], fill_up_missing=True)
-    dataframes = hyperopt.backtesting.strategy.ohlcvdata_to_dataframe(data)
+    dataframes = hyperopt.backtesting.strategy.advise_all_indicators(data)
     dataframe = hyperopt.custom_hyperopt.populate_indicators(dataframes['UNITTEST/BTC'],
                                                              {'pair': 'UNITTEST/BTC'})
 
@@ -540,7 +463,7 @@ def test_buy_strategy_generator(hyperopt, testdatadir) -> None:
 
 def test_sell_strategy_generator(hyperopt, testdatadir) -> None:
     data = load_data(testdatadir, '1m', ['UNITTEST/BTC'], fill_up_missing=True)
-    dataframes = hyperopt.backtesting.strategy.ohlcvdata_to_dataframe(data)
+    dataframes = hyperopt.backtesting.strategy.advise_all_indicators(data)
     dataframe = hyperopt.custom_hyperopt.populate_indicators(dataframes['UNITTEST/BTC'],
                                                              {'pair': 'UNITTEST/BTC'})
 
@@ -654,6 +577,7 @@ def test_generate_optimizer(mocker, hyperopt_conf) -> None:
                                    "20.0": 0.02,
                                    "50.0": 0.01,
                                    "110.0": 0},
+                           'protection': {},
                            'sell': {'sell-adx-enabled': False,
                                     'sell-adx-value': 0,
                                     'sell-fastd-enabled': True,
@@ -669,7 +593,7 @@ def test_generate_optimizer(mocker, hyperopt_conf) -> None:
                                         'trailing_stop_positive': 0.02,
                                         'trailing_stop_positive_offset': 0.07}},
         'params_dict': optimizer_param,
-        'params_not_optimized': {'buy': {}, 'sell': {}},
+        'params_not_optimized': {'buy': {}, 'protection': {}, 'sell': {}},
         'results_metrics': ANY,
         'total_profit': 3.1e-08
     }
@@ -686,6 +610,8 @@ def test_generate_optimizer(mocker, hyperopt_conf) -> None:
 def test_clean_hyperopt(mocker, hyperopt_conf, caplog):
     patch_exchange(mocker)
 
+    mocker.patch("freqtrade.strategy.hyper.HyperStrategyMixin.load_params_from_file",
+                 MagicMock(return_value={}))
     mocker.patch("freqtrade.optimize.hyperopt.Path.is_file", MagicMock(return_value=True))
     unlinkmock = mocker.patch("freqtrade.optimize.hyperopt.Path.unlink", MagicMock())
     h = Hyperopt(hyperopt_conf)
@@ -734,7 +660,7 @@ def test_print_json_spaces_all(mocker, hyperopt_conf, capsys) -> None:
                           })
 
     hyperopt = Hyperopt(hyperopt_conf)
-    hyperopt.backtesting.strategy.ohlcvdata_to_dataframe = MagicMock()
+    hyperopt.backtesting.strategy.advise_all_indicators = MagicMock()
     hyperopt.custom_hyperopt.generate_roi_table = MagicMock(return_value={})
 
     hyperopt.start()
@@ -787,7 +713,7 @@ def test_print_json_spaces_default(mocker, hyperopt_conf, capsys) -> None:
     hyperopt_conf.update({'print_json': True})
 
     hyperopt = Hyperopt(hyperopt_conf)
-    hyperopt.backtesting.strategy.ohlcvdata_to_dataframe = MagicMock()
+    hyperopt.backtesting.strategy.advise_all_indicators = MagicMock()
     hyperopt.custom_hyperopt.generate_roi_table = MagicMock(return_value={})
 
     hyperopt.start()
@@ -835,7 +761,7 @@ def test_print_json_spaces_roi_stoploss(mocker, hyperopt_conf, capsys) -> None:
                           })
 
     hyperopt = Hyperopt(hyperopt_conf)
-    hyperopt.backtesting.strategy.ohlcvdata_to_dataframe = MagicMock()
+    hyperopt.backtesting.strategy.advise_all_indicators = MagicMock()
     hyperopt.custom_hyperopt.generate_roi_table = MagicMock(return_value={})
 
     hyperopt.start()
@@ -879,7 +805,7 @@ def test_simplified_interface_roi_stoploss(mocker, hyperopt_conf, capsys) -> Non
     hyperopt_conf.update({'spaces': 'roi stoploss'})
 
     hyperopt = Hyperopt(hyperopt_conf)
-    hyperopt.backtesting.strategy.ohlcvdata_to_dataframe = MagicMock()
+    hyperopt.backtesting.strategy.advise_all_indicators = MagicMock()
     hyperopt.custom_hyperopt.generate_roi_table = MagicMock(return_value={})
 
     del hyperopt.custom_hyperopt.__class__.buy_strategy_generator
@@ -918,7 +844,7 @@ def test_simplified_interface_all_failed(mocker, hyperopt_conf) -> None:
     hyperopt_conf.update({'spaces': 'all', })
 
     hyperopt = Hyperopt(hyperopt_conf)
-    hyperopt.backtesting.strategy.ohlcvdata_to_dataframe = MagicMock()
+    hyperopt.backtesting.strategy.advise_all_indicators = MagicMock()
     hyperopt.custom_hyperopt.generate_roi_table = MagicMock(return_value={})
 
     del hyperopt.custom_hyperopt.__class__.buy_strategy_generator
@@ -960,7 +886,7 @@ def test_simplified_interface_buy(mocker, hyperopt_conf, capsys) -> None:
     hyperopt_conf.update({'spaces': 'buy'})
 
     hyperopt = Hyperopt(hyperopt_conf)
-    hyperopt.backtesting.strategy.ohlcvdata_to_dataframe = MagicMock()
+    hyperopt.backtesting.strategy.advise_all_indicators = MagicMock()
     hyperopt.custom_hyperopt.generate_roi_table = MagicMock(return_value={})
 
     # TODO: sell_strategy_generator() is actually not called because
@@ -1014,7 +940,7 @@ def test_simplified_interface_sell(mocker, hyperopt_conf, capsys) -> None:
     hyperopt_conf.update({'spaces': 'sell', })
 
     hyperopt = Hyperopt(hyperopt_conf)
-    hyperopt.backtesting.strategy.ohlcvdata_to_dataframe = MagicMock()
+    hyperopt.backtesting.strategy.advise_all_indicators = MagicMock()
     hyperopt.custom_hyperopt.generate_roi_table = MagicMock(return_value={})
 
     # TODO: buy_strategy_generator() is actually not called because
@@ -1059,49 +985,13 @@ def test_simplified_interface_failed(mocker, hyperopt_conf, method, space) -> No
     hyperopt_conf.update({'spaces': space})
 
     hyperopt = Hyperopt(hyperopt_conf)
-    hyperopt.backtesting.strategy.ohlcvdata_to_dataframe = MagicMock()
+    hyperopt.backtesting.strategy.advise_all_indicators = MagicMock()
     hyperopt.custom_hyperopt.generate_roi_table = MagicMock(return_value={})
 
     delattr(hyperopt.custom_hyperopt.__class__, method)
 
     with pytest.raises(OperationalException, match=f"The '{space}' space is included into *"):
         hyperopt.start()
-
-
-def test_show_epoch_details(capsys):
-    test_result = {
-        'params_details': {
-            'trailing': {
-                'trailing_stop': True,
-                'trailing_stop_positive': 0.02,
-                'trailing_stop_positive_offset': 0.04,
-                'trailing_only_offset_is_reached': True
-            },
-            'roi': {
-                0: 0.18,
-                90: 0.14,
-                225: 0.05,
-                430: 0},
-        },
-        'results_explanation': 'foo result',
-        'is_initial_point': False,
-        'total_profit': 0,
-        'current_epoch': 2,  # This starts from 1 (in a human-friendly manner)
-        'is_best': True
-    }
-
-    HyperoptTools.show_epoch_details(test_result, 5, False, no_header=True)
-    captured = capsys.readouterr()
-    assert '# Trailing stop:' in captured.out
-    # re.match(r"Pairs for .*", captured.out)
-    assert re.search(r'^\s+trailing_stop = True$', captured.out, re.MULTILINE)
-    assert re.search(r'^\s+trailing_stop_positive = 0.02$', captured.out, re.MULTILINE)
-    assert re.search(r'^\s+trailing_stop_positive_offset = 0.04$', captured.out, re.MULTILINE)
-    assert re.search(r'^\s+trailing_only_offset_is_reached = True$', captured.out, re.MULTILINE)
-
-    assert '# ROI table:' in captured.out
-    assert re.search(r'^\s+minimal_roi = \{$', captured.out, re.MULTILINE)
-    assert re.search(r'^\s+\"90\"\:\s0.14,\s*$', captured.out, re.MULTILINE)
 
 
 def test_in_strategy_auto_hyperopt(mocker, hyperopt_conf, tmpdir, fee) -> None:
@@ -1113,6 +1003,8 @@ def test_in_strategy_auto_hyperopt(mocker, hyperopt_conf, tmpdir, fee) -> None:
     hyperopt_conf.update({
         'strategy': 'HyperoptableStrategy',
         'user_data_dir': Path(tmpdir),
+        'hyperopt_random_state': 42,
+        'spaces': ['all']
     })
     hyperopt = Hyperopt(hyperopt_conf)
     assert isinstance(hyperopt.custom_hyperopt, HyperOptAuto)
@@ -1120,12 +1012,18 @@ def test_in_strategy_auto_hyperopt(mocker, hyperopt_conf, tmpdir, fee) -> None:
 
     assert hyperopt.backtesting.strategy.buy_rsi.in_space is True
     assert hyperopt.backtesting.strategy.buy_rsi.value == 35
+    assert hyperopt.backtesting.strategy.sell_rsi.value == 74
+    assert hyperopt.backtesting.strategy.protection_cooldown_lookback.value == 30
     buy_rsi_range = hyperopt.backtesting.strategy.buy_rsi.range
     assert isinstance(buy_rsi_range, range)
     # Range from 0 - 50 (inclusive)
     assert len(list(buy_rsi_range)) == 51
 
     hyperopt.start()
+    # All values should've changed.
+    assert hyperopt.backtesting.strategy.protection_cooldown_lookback.value != 30
+    assert hyperopt.backtesting.strategy.buy_rsi.value != 35
+    assert hyperopt.backtesting.strategy.sell_rsi.value != 74
 
 
 def test_SKDecimal():
@@ -1143,17 +1041,3 @@ def test_SKDecimal():
     assert space.transform([2.0]) == [200]
     assert space.transform([1.0]) == [100]
     assert space.transform([1.5, 1.6]) == [150, 160]
-
-
-def test___pprint():
-    params = {'buy_std': 1.2, 'buy_rsi': 31, 'buy_enable': True, 'buy_what': 'asdf'}
-    non_params = {'buy_notoptimied': 55}
-
-    x = HyperoptTools._pprint(params, non_params)
-    assert x == """{
-    "buy_std": 1.2,
-    "buy_rsi": 31,
-    "buy_enable": True,
-    "buy_what": "asdf",
-    "buy_notoptimied": 55,  # value loaded from strategy
-}"""

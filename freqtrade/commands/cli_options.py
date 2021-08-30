@@ -162,7 +162,7 @@ AVAILABLE_CLI_OPTIONS = {
         'Please note that ticker-interval needs to be set either in config '
         'or via command line. When using this together with `--export trades`, '
         'the strategy-name is injected into the filename '
-        '(so `backtest-data.json` becomes `backtest-data-DefaultStrategy.json`',
+        '(so `backtest-data.json` becomes `backtest-data-SampleStrategy.json`',
         nargs='+',
     ),
     "export": Arg(
@@ -177,6 +177,11 @@ AVAILABLE_CLI_OPTIONS = {
         'Requires `--export` to be set as well. '
         'Example: `--export-filename=user_data/backtest_results/backtest_today.json`',
         metavar='PATH',
+    ),
+    "disableparamexport": Arg(
+        '--disable-param-export',
+        help="Disable automatic hyperopt parameter export.",
+        action='store_true',
     ),
     "fee": Arg(
         '--fee',
@@ -213,7 +218,7 @@ AVAILABLE_CLI_OPTIONS = {
     "spaces": Arg(
         '--spaces',
         help='Specify which parameters to hyperopt. Space-separated list.',
-        choices=['all', 'buy', 'sell', 'roi', 'stoploss', 'trailing', 'default'],
+        choices=['all', 'buy', 'sell', 'roi', 'stoploss', 'trailing', 'protection', 'default'],
         nargs='+',
         default='default',
     ),

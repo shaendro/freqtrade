@@ -18,7 +18,7 @@ from freqtrade.enums import SellType, State
 from freqtrade.exceptions import ExchangeError, PricingError
 from freqtrade.exchange import timeframe_to_minutes, timeframe_to_msecs
 from freqtrade.loggers import bufferHandler
-from freqtrade.misc import shorten_date
+from freqtrade.misc import decimals_per_coin, shorten_date
 from freqtrade.persistence import PairLocks, Trade
 from freqtrade.persistence.models import PairLock
 from freqtrade.plugins.pairlist.pairlist_helpers import expand_pairlist
@@ -104,7 +104,9 @@ class RPC:
         val = {
             'dry_run': config['dry_run'],
             'stake_currency': config['stake_currency'],
+            'stake_currency_decimals':  decimals_per_coin(config['stake_currency']),
             'stake_amount': config['stake_amount'],
+            'available_capital': config.get('available_capital'),
             'max_open_trades': (config['max_open_trades']
                                 if config['max_open_trades'] != float('inf') else -1),
             'minimal_roi': config['minimal_roi'].copy() if 'minimal_roi' in config else {},
@@ -117,9 +119,9 @@ class RPC:
             'bot_name': config.get('bot_name', 'freqtrade'),
             'timeframe': config.get('timeframe'),
             'timeframe_ms': timeframe_to_msecs(config['timeframe']
-                                               ) if 'timeframe' in config else '',
+                                               ) if 'timeframe' in config else 0,
             'timeframe_min': timeframe_to_minutes(config['timeframe']
-                                                  ) if 'timeframe' in config else '',
+                                                  ) if 'timeframe' in config else 0,
             'exchange': config['exchange']['name'],
             'strategy': config['strategy'],
             'forcebuy_enabled': config.get('forcebuy_enable', False),
@@ -152,7 +154,8 @@ class RPC:
                 # calculate profit and send message to user
                 if trade.is_open:
                     try:
-                        current_rate = self._freqtrade.exchange.get_sell_rate(trade.pair, False)
+                        current_rate = self._freqtrade.exchange.get_rate(
+                            trade.pair, refresh=False, side="sell")
                     except (ExchangeError, PricingError):
                         current_rate = NAN
                 else:
@@ -180,9 +183,9 @@ class RPC:
                     base_currency=self._freqtrade.config['stake_currency'],
                     close_profit=trade.close_profit if trade.close_profit is not None else None,
                     current_rate=current_rate,
-                    current_profit=current_profit,  # Deprectated
-                    current_profit_pct=round(current_profit * 100, 2),  # Deprectated
-                    current_profit_abs=current_profit_abs,  # Deprectated
+                    current_profit=current_profit,  # Deprecated
+                    current_profit_pct=round(current_profit * 100, 2),  # Deprecated
+                    current_profit_abs=current_profit_abs,  # Deprecated
                     profit_ratio=current_profit,
                     profit_pct=round(current_profit * 100, 2),
                     profit_abs=current_profit_abs,
@@ -211,7 +214,8 @@ class RPC:
             for trade in trades:
                 # calculate profit and send message to user
                 try:
-                    current_rate = self._freqtrade.exchange.get_sell_rate(trade.pair, False)
+                    current_rate = self._freqtrade.exchange.get_rate(
+                        trade.pair, refresh=False, side="sell")
                 except (PricingError, ExchangeError):
                     current_rate = NAN
                 trade_percent = (100 * trade.calc_profit_ratio(current_rate))
@@ -270,10 +274,10 @@ class RPC:
                 'date': key,
                 'abs_profit': value["amount"],
                 'fiat_value': self._fiat_converter.convert_amount(
-                        value['amount'],
-                        stake_currency,
-                        fiat_display_currency
-                    ) if self._fiat_converter else 0,
+                    value['amount'],
+                    stake_currency,
+                    fiat_display_currency
+                ) if self._fiat_converter else 0,
                 'trade_count': value["trades"],
             }
             for key, value in profit_days.items()
@@ -339,7 +343,9 @@ class RPC:
             self, stake_currency: str, fiat_display_currency: str,
             start_date: datetime = datetime.fromtimestamp(0)) -> Dict[str, Any]:
         """ Returns cumulative profit statistics """
-        trades = Trade.get_trades([Trade.open_date >= start_date]).order_by(Trade.id).all()
+        trade_filter = ((Trade.is_open.is_(False) & (Trade.close_date >= start_date)) |
+                        Trade.is_open.is_(True))
+        trades = Trade.get_trades(trade_filter).order_by(Trade.id).all()
 
         profit_all_coin = []
         profit_all_ratio = []
@@ -368,7 +374,8 @@ class RPC:
             else:
                 # Get current rate
                 try:
-                    current_rate = self._freqtrade.exchange.get_sell_rate(trade.pair, False)
+                    current_rate = self._freqtrade.exchange.get_rate(
+                        trade.pair, refresh=False, side="sell")
                 except (PricingError, ExchangeError):
                     current_rate = NAN
                 profit_ratio = trade.calc_profit_ratio(rate=current_rate)
@@ -378,7 +385,7 @@ class RPC:
             )
             profit_all_ratio.append(profit_ratio)
 
-        best_pair = Trade.get_best_pair()
+        best_pair = Trade.get_best_pair(start_date)
 
         # Prepare data to display
         profit_closed_coin_sum = round(sum(profit_closed_coin), 8)
@@ -393,7 +400,12 @@ class RPC:
 
         profit_all_coin_sum = round(sum(profit_all_coin), 8)
         profit_all_ratio_mean = float(mean(profit_all_ratio) if profit_all_ratio else 0.0)
+        # Doing the sum is not right - overall profit needs to be based on initial capital
         profit_all_ratio_sum = sum(profit_all_ratio) if profit_all_ratio else 0.0
+        starting_balance = self._freqtrade.wallets.get_starting_balance()
+        profit_closed_ratio_fromstart = profit_closed_coin_sum / starting_balance
+        profit_all_ratio_fromstart = profit_all_coin_sum / starting_balance
+
         profit_all_fiat = self._fiat_converter.convert_amount(
             profit_all_coin_sum,
             stake_currency,
@@ -409,12 +421,16 @@ class RPC:
             'profit_closed_ratio_mean': profit_closed_ratio_mean,
             'profit_closed_percent_sum': round(profit_closed_ratio_sum * 100, 2),
             'profit_closed_ratio_sum': profit_closed_ratio_sum,
+            'profit_closed_ratio': profit_closed_ratio_fromstart,
+            'profit_closed_percent': round(profit_closed_ratio_fromstart * 100, 2),
             'profit_closed_fiat': profit_closed_fiat,
             'profit_all_coin': profit_all_coin_sum,
             'profit_all_percent_mean': round(profit_all_ratio_mean * 100, 2),
             'profit_all_ratio_mean': profit_all_ratio_mean,
             'profit_all_percent_sum': round(profit_all_ratio_sum * 100, 2),
             'profit_all_ratio_sum': profit_all_ratio_sum,
+            'profit_all_ratio': profit_all_ratio_fromstart,
+            'profit_all_percent': round(profit_all_ratio_fromstart * 100, 2),
             'profit_all_fiat': profit_all_fiat,
             'trade_count': len(trades),
             'closed_trade_count': len([t for t in trades if not t.is_open]),
@@ -538,9 +554,10 @@ class RPC:
 
             if not fully_canceled:
                 # Get current rate and execute sell
-                current_rate = self._freqtrade.exchange.get_sell_rate(trade.pair, False)
+                current_rate = self._freqtrade.exchange.get_rate(
+                    trade.pair, refresh=False, side="sell")
                 sell_reason = SellCheckTuple(sell_type=SellType.FORCE_SELL)
-                self._freqtrade.execute_sell(trade, current_rate, sell_reason)
+                self._freqtrade.execute_trade_exit(trade, current_rate, sell_reason)
         # ---- EOF def _exec_forcesell ----
 
         if self._freqtrade.state != State.RUNNING:
@@ -596,7 +613,7 @@ class RPC:
         stakeamount = self._freqtrade.wallets.get_trade_stake_amount(pair)
 
         # execute buy
-        if self._freqtrade.execute_buy(pair, stakeamount, price, forcebuy=True):
+        if self._freqtrade.execute_entry(pair, stakeamount, price, forcebuy=True):
             Trade.commit()
             trade = Trade.get_trades([Trade.is_open.is_(True), Trade.pair == pair]).first()
             return trade
@@ -758,8 +775,8 @@ class RPC:
         sell_signals = 0
         if has_content:
 
-            dataframe.loc[:, '__date_ts'] = dataframe.loc[:, 'date'].astype(int64) // 1000 // 1000
-            # Move open to seperate column when signal for easy plotting
+            dataframe.loc[:, '__date_ts'] = dataframe.loc[:, 'date'].view(int64) // 1000 // 1000
+            # Move open to separate column when signal for easy plotting
             if 'buy' in dataframe.columns:
                 buy_mask = (dataframe['buy'] == 1)
                 buy_signals = int(buy_mask.sum())
@@ -822,8 +839,11 @@ class RPC:
         )
         if pair not in _data:
             raise RPCException(f"No data for {pair}, {timeframe} in {timerange} found.")
+        from freqtrade.data.dataprovider import DataProvider
         from freqtrade.resolvers.strategy_resolver import StrategyResolver
         strategy = StrategyResolver.load_strategy(config)
+        strategy.dp = DataProvider(config, exchange=None, pairlists=None)
+
         df_analyzed = strategy.analyze_ticker(_data[pair], {'pair': pair})
 
         return RPC._convert_dataframe_to_dict(strategy.get_strategy_name(), pair, timeframe,

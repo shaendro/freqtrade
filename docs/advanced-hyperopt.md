@@ -32,6 +32,7 @@ class SuperDuperHyperOptLoss(IHyperOptLoss):
     def hyperopt_loss_function(results: DataFrame, trade_count: int,
                                min_date: datetime, max_date: datetime,
                                config: Dict, processed: Dict[str, DataFrame],
+                               backtest_stats: Dict[str, Any],
                                *args, **kwargs) -> float:
         """
         Objective function, returns smaller number for better results
@@ -53,7 +54,7 @@ class SuperDuperHyperOptLoss(IHyperOptLoss):
 
 Currently, the arguments are:
 
-* `results`: DataFrame containing the result  
+* `results`: DataFrame containing the resulting trades.
     The following columns are available in results (corresponds to the output-file of backtesting when used with `--export trades`):  
     `pair, profit_ratio, profit_abs, open_date, open_rate, fee_open, close_date, close_rate, fee_close, amount, trade_duration, is_open, sell_reason, stake_amount, min_rate, max_rate, stop_loss_ratio, stop_loss_abs`
 * `trade_count`: Amount of trades (identical to `len(results)`)
@@ -61,6 +62,7 @@ Currently, the arguments are:
 * `min_date`: End date of the timerange used
 * `config`: Config object used (Note: Not all strategy-related parameters will be updated here if they are part of a hyperopt space).
 * `processed`: Dict of Dataframes with the pair as keys containing the data used for backtesting.
+* `backtest_stats`: Backtesting statistics using the same format as the backtesting file "strategy" substructure. Available fields can be seen in `generate_strategy_stats()` in `optimize_reports.py`.
 
 This function needs to return a floating point number (`float`). Smaller numbers will be interpreted as better results. The parameters and balancing for this is up to you.
 
@@ -333,7 +335,7 @@ Once the optimized parameters and conditions have been implemented into your str
 
 To achieve same results (number of trades, their durations, profit, etc.) than during Hyperopt, please use same configuration and parameters (timerange, timeframe, ...) used for hyperopt `--dmmp`/`--disable-max-market-positions` and `--eps`/`--enable-position-stacking` for Backtesting.
 
-Should results don't match, please double-check to make sure you transferred all conditions correctly.
+Should results not match, please double-check to make sure you transferred all conditions correctly.
 Pay special care to the stoploss (and trailing stoploss) parameters, as these are often set in configuration files, which override changes to the strategy.
 You should also carefully review the log of your backtest to ensure that there were no parameters inadvertently set by the configuration (like `stoploss` or `trailing_stop`).
 

@@ -557,7 +557,7 @@ def test_reload_markets_exception(default_conf, mocker, caplog):
 
 
 @pytest.mark.parametrize("stake_currency", ['ETH', 'BTC', 'USDT'])
-def test_validate_stake_currency(default_conf, stake_currency, mocker, caplog):
+def test_validate_stakecurrency(default_conf, stake_currency, mocker, caplog):
     default_conf['stake_currency'] = stake_currency
     api_mock = MagicMock()
     type(api_mock).load_markets = MagicMock(return_value={
@@ -571,7 +571,7 @@ def test_validate_stake_currency(default_conf, stake_currency, mocker, caplog):
     Exchange(default_conf)
 
 
-def test_validate_stake_currency_error(default_conf, mocker, caplog):
+def test_validate_stakecurrency_error(default_conf, mocker, caplog):
     default_conf['stake_currency'] = 'XRP'
     api_mock = MagicMock()
     type(api_mock).load_markets = MagicMock(return_value={
@@ -585,6 +585,13 @@ def test_validate_stake_currency_error(default_conf, mocker, caplog):
     with pytest.raises(OperationalException,
                        match=r'XRP is not available as stake on .*'
                        'Available currencies are: BTC, ETH, USDT'):
+        Exchange(default_conf)
+
+    type(api_mock).load_markets = MagicMock(side_effect=ccxt.NetworkError('No connection.'))
+    mocker.patch('freqtrade.exchange.Exchange._init_ccxt', MagicMock(return_value=api_mock))
+
+    with pytest.raises(OperationalException,
+                       match=r'Could not load markets, therefore cannot start\. Please.*'):
         Exchange(default_conf)
 
 
@@ -673,7 +680,7 @@ def test_validate_pairs_restricted(default_conf, mocker, caplog):
     api_mock = MagicMock()
     type(api_mock).load_markets = MagicMock(return_value={
         'ETH/BTC': {'quote': 'BTC'}, 'LTC/BTC': {'quote': 'BTC'},
-        'XRP/BTC': {'quote': 'BTC', 'info': {'IsRestricted': True}},
+        'XRP/BTC': {'quote': 'BTC', 'info': {'prohibitedIn': ['US']}},
         'NEO/BTC': {'quote': 'BTC', 'info': 'TestString'},  # info can also be a string ...
     })
     mocker.patch('freqtrade.exchange.Exchange._init_ccxt', MagicMock(return_value=api_mock))
@@ -947,6 +954,77 @@ def test_create_dry_run_order(default_conf, mocker, side, exchange_name):
     assert order["symbol"] == "ETH/BTC"
 
 
+@pytest.mark.parametrize("side,startprice,endprice", [
+    ("buy", 25.563, 25.566),
+    ("sell", 25.566, 25.563)
+])
+@pytest.mark.parametrize("exchange_name", EXCHANGES)
+def test_create_dry_run_order_limit_fill(default_conf, mocker, side, startprice, endprice,
+                                         exchange_name, order_book_l2_usd):
+    default_conf['dry_run'] = True
+    exchange = get_patched_exchange(mocker, default_conf, id=exchange_name)
+    mocker.patch.multiple('freqtrade.exchange.Exchange',
+                          exchange_has=MagicMock(return_value=True),
+                          fetch_l2_order_book=order_book_l2_usd,
+                          )
+
+    order = exchange.create_dry_run_order(
+        pair='LTC/USDT', ordertype='limit', side=side, amount=1, rate=startprice)
+    assert order_book_l2_usd.call_count == 1
+    assert 'id' in order
+    assert f'dry_run_{side}_' in order["id"]
+    assert order["side"] == side
+    assert order["type"] == "limit"
+    assert order["symbol"] == "LTC/USDT"
+    order_book_l2_usd.reset_mock()
+
+    order_closed = exchange.fetch_dry_run_order(order['id'])
+    assert order_book_l2_usd.call_count == 1
+    assert order_closed['status'] == 'open'
+    assert not order['fee']
+
+    order_book_l2_usd.reset_mock()
+    order_closed['price'] = endprice
+
+    order_closed = exchange.fetch_dry_run_order(order['id'])
+    assert order_closed['status'] == 'closed'
+    assert order['fee']
+
+
+@pytest.mark.parametrize("side,rate,amount,endprice", [
+    # spread is 25.263-25.266
+    ("buy", 25.564, 1, 25.566),
+    ("buy", 25.564, 100, 25.5672),  # Requires interpolation
+    ("buy", 25.590, 100, 25.5672),  # Price above spread ... average is lower
+    ("buy", 25.564, 1000, 25.575),  # More than orderbook return
+    ("buy", 24.000, 100000, 25.200),  # Run into max_slippage of 5%
+    ("sell", 25.564, 1, 25.563),
+    ("sell", 25.564, 100, 25.5625),  # Requires interpolation
+    ("sell", 25.510, 100, 25.5625),  # price below spread - average is higher
+    ("sell", 25.564, 1000, 25.5555),  # More than orderbook return
+    ("sell", 27, 10000, 25.65),  # max-slippage 5%
+])
+@pytest.mark.parametrize("exchange_name", EXCHANGES)
+def test_create_dry_run_order_market_fill(default_conf, mocker, side, rate, amount, endprice,
+                                          exchange_name, order_book_l2_usd):
+    default_conf['dry_run'] = True
+    exchange = get_patched_exchange(mocker, default_conf, id=exchange_name)
+    mocker.patch.multiple('freqtrade.exchange.Exchange',
+                          exchange_has=MagicMock(return_value=True),
+                          fetch_l2_order_book=order_book_l2_usd,
+                          )
+
+    order = exchange.create_dry_run_order(
+        pair='LTC/USDT', ordertype='market', side=side, amount=amount, rate=rate)
+    assert 'id' in order
+    assert f'dry_run_{side}_' in order["id"]
+    assert order["side"] == side
+    assert order["type"] == "market"
+    assert order["symbol"] == "LTC/USDT"
+    assert order['status'] == 'closed'
+    assert round(order["average"], 4) == round(endprice, 4)
+
+
 @pytest.mark.parametrize("side", [
     ("buy"),
     ("sell")
@@ -990,8 +1068,8 @@ def test_buy_dry_run(default_conf, mocker):
     default_conf['dry_run'] = True
     exchange = get_patched_exchange(mocker, default_conf)
 
-    order = exchange.buy(pair='ETH/BTC', ordertype='limit',
-                         amount=1, rate=200, time_in_force='gtc')
+    order = exchange.create_order(pair='ETH/BTC', ordertype='limit', side="buy",
+                                  amount=1, rate=200, time_in_force='gtc')
     assert 'id' in order
     assert 'dry_run_buy_' in order['id']
 
@@ -1014,8 +1092,8 @@ def test_buy_prod(default_conf, mocker, exchange_name):
     mocker.patch('freqtrade.exchange.Exchange.price_to_precision', lambda s, x, y: y)
     exchange = get_patched_exchange(mocker, default_conf, api_mock, id=exchange_name)
 
-    order = exchange.buy(pair='ETH/BTC', ordertype=order_type,
-                         amount=1, rate=200, time_in_force=time_in_force)
+    order = exchange.create_order(pair='ETH/BTC', ordertype=order_type, side="buy",
+                                  amount=1, rate=200, time_in_force=time_in_force)
 
     assert 'id' in order
     assert 'info' in order
@@ -1028,9 +1106,10 @@ def test_buy_prod(default_conf, mocker, exchange_name):
 
     api_mock.create_order.reset_mock()
     order_type = 'limit'
-    order = exchange.buy(
+    order = exchange.create_order(
         pair='ETH/BTC',
         ordertype=order_type,
+        side="buy",
         amount=1,
         rate=200,
         time_in_force=time_in_force)
@@ -1044,32 +1123,32 @@ def test_buy_prod(default_conf, mocker, exchange_name):
     with pytest.raises(DependencyException):
         api_mock.create_order = MagicMock(side_effect=ccxt.InsufficientFunds("Not enough funds"))
         exchange = get_patched_exchange(mocker, default_conf, api_mock, id=exchange_name)
-        exchange.buy(pair='ETH/BTC', ordertype=order_type,
-                     amount=1, rate=200, time_in_force=time_in_force)
+        exchange.create_order(pair='ETH/BTC', ordertype=order_type, side="buy",
+                              amount=1, rate=200, time_in_force=time_in_force)
 
     with pytest.raises(DependencyException):
         api_mock.create_order = MagicMock(side_effect=ccxt.InvalidOrder("Order not found"))
         exchange = get_patched_exchange(mocker, default_conf, api_mock, id=exchange_name)
-        exchange.buy(pair='ETH/BTC', ordertype='limit',
-                     amount=1, rate=200, time_in_force=time_in_force)
+        exchange.create_order(pair='ETH/BTC', ordertype='limit', side="buy",
+                              amount=1, rate=200, time_in_force=time_in_force)
 
     with pytest.raises(DependencyException):
         api_mock.create_order = MagicMock(side_effect=ccxt.InvalidOrder("Order not found"))
         exchange = get_patched_exchange(mocker, default_conf, api_mock, id=exchange_name)
-        exchange.buy(pair='ETH/BTC', ordertype='market',
-                     amount=1, rate=200, time_in_force=time_in_force)
+        exchange.create_order(pair='ETH/BTC', ordertype='market', side="buy",
+                              amount=1, rate=200, time_in_force=time_in_force)
 
     with pytest.raises(TemporaryError):
         api_mock.create_order = MagicMock(side_effect=ccxt.NetworkError("Network disconnect"))
         exchange = get_patched_exchange(mocker, default_conf, api_mock, id=exchange_name)
-        exchange.buy(pair='ETH/BTC', ordertype=order_type,
-                     amount=1, rate=200, time_in_force=time_in_force)
+        exchange.create_order(pair='ETH/BTC', ordertype=order_type, side="buy",
+                              amount=1, rate=200, time_in_force=time_in_force)
 
     with pytest.raises(OperationalException):
         api_mock.create_order = MagicMock(side_effect=ccxt.BaseError("Unknown error"))
         exchange = get_patched_exchange(mocker, default_conf, api_mock, id=exchange_name)
-        exchange.buy(pair='ETH/BTC', ordertype=order_type,
-                     amount=1, rate=200, time_in_force=time_in_force)
+        exchange.create_order(pair='ETH/BTC', ordertype=order_type, side="buy",
+                              amount=1, rate=200, time_in_force=time_in_force)
 
 
 @pytest.mark.parametrize("exchange_name", EXCHANGES)
@@ -1091,8 +1170,8 @@ def test_buy_considers_time_in_force(default_conf, mocker, exchange_name):
     order_type = 'limit'
     time_in_force = 'ioc'
 
-    order = exchange.buy(pair='ETH/BTC', ordertype=order_type,
-                         amount=1, rate=200, time_in_force=time_in_force)
+    order = exchange.create_order(pair='ETH/BTC', ordertype=order_type, side="buy",
+                                  amount=1, rate=200, time_in_force=time_in_force)
 
     assert 'id' in order
     assert 'info' in order
@@ -1108,8 +1187,8 @@ def test_buy_considers_time_in_force(default_conf, mocker, exchange_name):
     order_type = 'market'
     time_in_force = 'ioc'
 
-    order = exchange.buy(pair='ETH/BTC', ordertype=order_type,
-                         amount=1, rate=200, time_in_force=time_in_force)
+    order = exchange.create_order(pair='ETH/BTC', ordertype=order_type, side="buy",
+                                  amount=1, rate=200, time_in_force=time_in_force)
 
     assert 'id' in order
     assert 'info' in order
@@ -1127,7 +1206,8 @@ def test_sell_dry_run(default_conf, mocker):
     default_conf['dry_run'] = True
     exchange = get_patched_exchange(mocker, default_conf)
 
-    order = exchange.sell(pair='ETH/BTC', ordertype='limit', amount=1, rate=200)
+    order = exchange.create_order(pair='ETH/BTC', ordertype='limit',
+                                  side="sell", amount=1, rate=200)
     assert 'id' in order
     assert 'dry_run_sell_' in order['id']
 
@@ -1150,7 +1230,8 @@ def test_sell_prod(default_conf, mocker, exchange_name):
     mocker.patch('freqtrade.exchange.Exchange.price_to_precision', lambda s, x, y: y)
     exchange = get_patched_exchange(mocker, default_conf, api_mock, id=exchange_name)
 
-    order = exchange.sell(pair='ETH/BTC', ordertype=order_type, amount=1, rate=200)
+    order = exchange.create_order(pair='ETH/BTC', ordertype=order_type,
+                                  side="sell", amount=1, rate=200)
 
     assert 'id' in order
     assert 'info' in order
@@ -1163,7 +1244,8 @@ def test_sell_prod(default_conf, mocker, exchange_name):
 
     api_mock.create_order.reset_mock()
     order_type = 'limit'
-    order = exchange.sell(pair='ETH/BTC', ordertype=order_type, amount=1, rate=200)
+    order = exchange.create_order(pair='ETH/BTC', ordertype=order_type,
+                                  side="sell", amount=1, rate=200)
     assert api_mock.create_order.call_args[0][0] == 'ETH/BTC'
     assert api_mock.create_order.call_args[0][1] == order_type
     assert api_mock.create_order.call_args[0][2] == 'sell'
@@ -1174,28 +1256,28 @@ def test_sell_prod(default_conf, mocker, exchange_name):
     with pytest.raises(DependencyException):
         api_mock.create_order = MagicMock(side_effect=ccxt.InsufficientFunds("0 balance"))
         exchange = get_patched_exchange(mocker, default_conf, api_mock, id=exchange_name)
-        exchange.sell(pair='ETH/BTC', ordertype=order_type, amount=1, rate=200)
+        exchange.create_order(pair='ETH/BTC', ordertype=order_type, side="sell", amount=1, rate=200)
 
     with pytest.raises(DependencyException):
         api_mock.create_order = MagicMock(side_effect=ccxt.InvalidOrder("Order not found"))
         exchange = get_patched_exchange(mocker, default_conf, api_mock, id=exchange_name)
-        exchange.sell(pair='ETH/BTC', ordertype='limit', amount=1, rate=200)
+        exchange.create_order(pair='ETH/BTC', ordertype='limit', side="sell", amount=1, rate=200)
 
     # Market orders don't require price, so the behaviour is slightly different
     with pytest.raises(DependencyException):
         api_mock.create_order = MagicMock(side_effect=ccxt.InvalidOrder("Order not found"))
         exchange = get_patched_exchange(mocker, default_conf, api_mock, id=exchange_name)
-        exchange.sell(pair='ETH/BTC', ordertype='market', amount=1, rate=200)
+        exchange.create_order(pair='ETH/BTC', ordertype='market', side="sell", amount=1, rate=200)
 
     with pytest.raises(TemporaryError):
         api_mock.create_order = MagicMock(side_effect=ccxt.NetworkError("No Connection"))
         exchange = get_patched_exchange(mocker, default_conf, api_mock, id=exchange_name)
-        exchange.sell(pair='ETH/BTC', ordertype=order_type, amount=1, rate=200)
+        exchange.create_order(pair='ETH/BTC', ordertype=order_type, side="sell", amount=1, rate=200)
 
     with pytest.raises(OperationalException):
         api_mock.create_order = MagicMock(side_effect=ccxt.BaseError("DeadBeef"))
         exchange = get_patched_exchange(mocker, default_conf, api_mock, id=exchange_name)
-        exchange.sell(pair='ETH/BTC', ordertype=order_type, amount=1, rate=200)
+        exchange.create_order(pair='ETH/BTC', ordertype=order_type, side="sell", amount=1, rate=200)
 
 
 @pytest.mark.parametrize("exchange_name", EXCHANGES)
@@ -1217,8 +1299,8 @@ def test_sell_considers_time_in_force(default_conf, mocker, exchange_name):
     order_type = 'limit'
     time_in_force = 'ioc'
 
-    order = exchange.sell(pair='ETH/BTC', ordertype=order_type,
-                          amount=1, rate=200, time_in_force=time_in_force)
+    order = exchange.create_order(pair='ETH/BTC', ordertype=order_type, side="sell",
+                                  amount=1, rate=200, time_in_force=time_in_force)
 
     assert 'id' in order
     assert 'info' in order
@@ -1233,8 +1315,8 @@ def test_sell_considers_time_in_force(default_conf, mocker, exchange_name):
 
     order_type = 'market'
     time_in_force = 'ioc'
-    order = exchange.sell(pair='ETH/BTC', ordertype=order_type,
-                          amount=1, rate=200, time_in_force=time_in_force)
+    order = exchange.create_order(pair='ETH/BTC', ordertype=order_type, side="sell",
+                                  amount=1, rate=200, time_in_force=time_in_force)
 
     assert 'id' in order
     assert 'info' in order
@@ -1489,13 +1571,16 @@ def test_refresh_latest_ohlcv(mocker, default_conf, caplog) -> None:
     pairs = [('IOTA/ETH', '5m'), ('XRP/ETH', '5m')]
     # empty dicts
     assert not exchange._klines
-    exchange.refresh_latest_ohlcv(pairs, cache=False)
+    res = exchange.refresh_latest_ohlcv(pairs, cache=False)
     # No caching
     assert not exchange._klines
+
+    assert len(res) == len(pairs)
     assert exchange._api_async.fetch_ohlcv.call_count == 2
     exchange._api_async.fetch_ohlcv.reset_mock()
 
-    exchange.refresh_latest_ohlcv(pairs)
+    res = exchange.refresh_latest_ohlcv(pairs)
+    assert len(res) == len(pairs)
 
     assert log_has(f'Refreshing candle (OHLCV) data for {len(pairs)} pairs', caplog)
     assert exchange._klines
@@ -1512,12 +1597,16 @@ def test_refresh_latest_ohlcv(mocker, default_conf, caplog) -> None:
         assert exchange.klines(pair, copy=False) is exchange.klines(pair, copy=False)
 
     # test caching
-    exchange.refresh_latest_ohlcv([('IOTA/ETH', '5m'), ('XRP/ETH', '5m')])
+    res = exchange.refresh_latest_ohlcv([('IOTA/ETH', '5m'), ('XRP/ETH', '5m')])
+    assert len(res) == len(pairs)
 
     assert exchange._api_async.fetch_ohlcv.call_count == 2
     assert log_has(f"Using cached candle (OHLCV) data for pair {pairs[0][0]}, "
                    f"timeframe {pairs[0][1]} ...",
                    caplog)
+    res = exchange.refresh_latest_ohlcv([('IOTA/ETH', '5m'), ('XRP/ETH', '5m'), ('XRP/ETH', '1d')],
+                                        cache=False)
+    assert len(res) == 3
 
 
 @pytest.mark.asyncio
@@ -1717,14 +1806,14 @@ def test_get_buy_rate(mocker, default_conf, caplog, side, ask, bid,
     mocker.patch('freqtrade.exchange.Exchange.fetch_ticker',
                  return_value={'ask': ask, 'last': last, 'bid': bid})
 
-    assert exchange.get_buy_rate('ETH/BTC', True) == expected
+    assert exchange.get_rate('ETH/BTC', refresh=True, side="buy") == expected
     assert not log_has("Using cached buy rate for ETH/BTC.", caplog)
 
-    assert exchange.get_buy_rate('ETH/BTC', False) == expected
+    assert exchange.get_rate('ETH/BTC', refresh=False, side="buy") == expected
     assert log_has("Using cached buy rate for ETH/BTC.", caplog)
     # Running a 2nd time with Refresh on!
     caplog.clear()
-    assert exchange.get_buy_rate('ETH/BTC', True) == expected
+    assert exchange.get_rate('ETH/BTC', refresh=True, side="buy") == expected
     assert not log_has("Using cached buy rate for ETH/BTC.", caplog)
 
 
@@ -1759,14 +1848,39 @@ def test_get_sell_rate(default_conf, mocker, caplog, side, bid, ask,
 
     # Test regular mode
     exchange = get_patched_exchange(mocker, default_conf)
-    rate = exchange.get_sell_rate(pair, True)
+    rate = exchange.get_rate(pair, refresh=True, side="sell")
     assert not log_has("Using cached sell rate for ETH/BTC.", caplog)
     assert isinstance(rate, float)
     assert rate == expected
     # Use caching
-    rate = exchange.get_sell_rate(pair, False)
+    rate = exchange.get_rate(pair, refresh=False, side="sell")
     assert rate == expected
     assert log_has("Using cached sell rate for ETH/BTC.", caplog)
+
+
+@pytest.mark.parametrize("entry,side,ask,bid,last,last_ab,expected", [
+    ('buy', 'ask', None, 4, 4,  0, 4),  # ask not available
+    ('buy', 'ask', None, None, 4,  0, 4),  # ask not available
+    ('buy', 'bid', 6, None, 4,  0, 5),  # bid not available
+    ('buy', 'bid', None, None, 4,  0, 5),  # No rate available
+    ('sell', 'ask', None, 4, 4,  0, 4),  # ask not available
+    ('sell', 'ask', None, None, 4,  0, 4),  # ask not available
+    ('sell', 'bid', 6, None, 4,  0, 5),  # bid not available
+    ('sell', 'bid', None, None, 4,  0, 5),  # bid not available
+])
+def test_get_ticker_rate_error(mocker, entry, default_conf, caplog, side, ask, bid,
+                               last, last_ab, expected) -> None:
+    caplog.set_level(logging.DEBUG)
+    default_conf['bid_strategy']['ask_last_balance'] = last_ab
+    default_conf['bid_strategy']['price_side'] = side
+    default_conf['ask_strategy']['price_side'] = side
+    default_conf['ask_strategy']['ask_last_balance'] = last_ab
+    exchange = get_patched_exchange(mocker, default_conf)
+    mocker.patch('freqtrade.exchange.Exchange.fetch_ticker',
+                 return_value={'ask': ask, 'last': last, 'bid': bid})
+
+    with pytest.raises(PricingError):
+        exchange.get_rate('ETH/BTC', refresh=True, side=entry)
 
 
 @pytest.mark.parametrize('side,expected', [
@@ -1778,16 +1892,15 @@ def test_get_sell_rate_orderbook(default_conf, mocker, caplog, side, expected, o
     # Test orderbook mode
     default_conf['ask_strategy']['price_side'] = side
     default_conf['ask_strategy']['use_order_book'] = True
-    default_conf['ask_strategy']['order_book_min'] = 1
-    default_conf['ask_strategy']['order_book_max'] = 2
+    default_conf['ask_strategy']['order_book_top'] = 1
     pair = "ETH/BTC"
     mocker.patch('freqtrade.exchange.Exchange.fetch_l2_order_book', order_book_l2)
     exchange = get_patched_exchange(mocker, default_conf)
-    rate = exchange.get_sell_rate(pair, True)
+    rate = exchange.get_rate(pair, refresh=True, side="sell")
     assert not log_has("Using cached sell rate for ETH/BTC.", caplog)
     assert isinstance(rate, float)
     assert rate == expected
-    rate = exchange.get_sell_rate(pair, False)
+    rate = exchange.get_rate(pair, refresh=False, side="sell")
     assert rate == expected
     assert log_has("Using cached sell rate for ETH/BTC.", caplog)
 
@@ -1796,16 +1909,16 @@ def test_get_sell_rate_orderbook_exception(default_conf, mocker, caplog):
     # Test orderbook mode
     default_conf['ask_strategy']['price_side'] = 'ask'
     default_conf['ask_strategy']['use_order_book'] = True
-    default_conf['ask_strategy']['order_book_min'] = 1
-    default_conf['ask_strategy']['order_book_max'] = 2
+    default_conf['ask_strategy']['order_book_top'] = 1
     pair = "ETH/BTC"
     # Test What happens if the exchange returns an empty orderbook.
     mocker.patch('freqtrade.exchange.Exchange.fetch_l2_order_book',
                  return_value={'bids': [[]], 'asks': [[]]})
     exchange = get_patched_exchange(mocker, default_conf)
     with pytest.raises(PricingError):
-        exchange.get_sell_rate(pair, True)
-    assert log_has("Sell Price at location from orderbook could not be determined.", caplog)
+        exchange.get_rate(pair, refresh=True, side="sell")
+    assert log_has_re(r"Sell Price at location 1 from orderbook could not be determined\..*",
+                      caplog)
 
 
 def test_get_sell_rate_exception(default_conf, mocker, caplog):
@@ -1816,18 +1929,18 @@ def test_get_sell_rate_exception(default_conf, mocker, caplog):
                  return_value={'ask': None, 'bid': 0.12, 'last': None})
     exchange = get_patched_exchange(mocker, default_conf)
     with pytest.raises(PricingError, match=r"Sell-Rate for ETH/BTC was empty."):
-        exchange.get_sell_rate(pair, True)
+        exchange.get_rate(pair, refresh=True, side="sell")
 
     exchange._config['ask_strategy']['price_side'] = 'bid'
-    assert exchange.get_sell_rate(pair, True) == 0.12
+    assert exchange.get_rate(pair, refresh=True, side="sell") == 0.12
     # Reverse sides
     mocker.patch('freqtrade.exchange.Exchange.fetch_ticker',
                  return_value={'ask': 0.13, 'bid': None, 'last': None})
     with pytest.raises(PricingError, match=r"Sell-Rate for ETH/BTC was empty."):
-        exchange.get_sell_rate(pair, True)
+        exchange.get_rate(pair, refresh=True, side="sell")
 
     exchange._config['ask_strategy']['price_side'] = 'ask'
-    assert exchange.get_sell_rate(pair, True) == 0.13
+    assert exchange.get_rate(pair, refresh=True, side="sell") == 0.13
 
 
 def make_fetch_ohlcv_mock(data):
@@ -2108,7 +2221,7 @@ def test_get_historic_trades_notsupported(default_conf, mocker, caplog, exchange
     pair = 'ETH/BTC'
 
     with pytest.raises(OperationalException,
-                       match="This exchange does not suport downloading Trades."):
+                       match="This exchange does not support downloading Trades."):
         exchange.get_historic_trades(pair, since=trades_history[0][0],
                                      until=trades_history[-1][0])
 
@@ -2117,10 +2230,11 @@ def test_get_historic_trades_notsupported(default_conf, mocker, caplog, exchange
 def test_cancel_order_dry_run(default_conf, mocker, exchange_name):
     default_conf['dry_run'] = True
     exchange = get_patched_exchange(mocker, default_conf, id=exchange_name)
+    mocker.patch('freqtrade.exchange.Exchange._is_dry_limit_order_filled', return_value=True)
     assert exchange.cancel_order(order_id='123', pair='TKN/BTC') == {}
     assert exchange.cancel_stoploss_order(order_id='123', pair='TKN/BTC') == {}
 
-    order = exchange.buy('ETH/BTC', 'limit', 5, 0.55, 'gtc')
+    order = exchange.create_order('ETH/BTC', 'limit', "buy", 5, 0.55, 'gtc')
 
     cancel_order = exchange.cancel_order(order_id=order['id'], pair='ETH/BTC')
     assert order['id'] == cancel_order['id']
@@ -2137,7 +2251,7 @@ def test_cancel_order_dry_run(default_conf, mocker, exchange_name):
     ({'status': 'canceled', 'filled': 10.0}, False),
     ({'status': 'unknown', 'filled': 10.0}, False),
     ({'result': 'testest123'}, False),
-    ])
+])
 def test_check_order_canceled_empty(mocker, default_conf, exchange_name, order, result):
     exchange = get_patched_exchange(mocker, default_conf, id=exchange_name)
     assert exchange.check_order_canceled_empty(order) == result
