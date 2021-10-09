@@ -426,8 +426,8 @@ class FreqtradeBot(LoggingMixin):
             analyzed_df
         )
 
-        if buy:
         # if buy and not sell:
+        if buy: # CUSTOM CHANGE
             stake_amount = self.wallets.get_trade_stake_amount(pair, self.edge)
 
             bid_check_dom = self.config.get('bid_strategy', {}).get('check_depth_of_market', {})
