@@ -117,7 +117,7 @@ AVAILABLE_CLI_OPTIONS = {
     ),
     # Optimize common
     "timeframe": Arg(
-        '-i', '--timeframe', '--ticker-interval',
+        '-i', '--timeframe',
         help='Specify timeframe (`1m`, `5m`, `30m`, `1h`, `1d`).',
     ),
     "timerange": Arg(
@@ -152,6 +152,12 @@ AVAILABLE_CLI_OPTIONS = {
         action='store_false',
         default=True,
     ),
+    "backtest_show_pair_list": Arg(
+        '--show-pair-list',
+        help='Show backtesting pairlist sorted by profit.',
+        action='store_true',
+        default=False,
+    ),
     "enable_protections": Arg(
         '--enable-protections', '--enableprotections',
         help='Enable protections for backtesting.'
@@ -163,7 +169,7 @@ AVAILABLE_CLI_OPTIONS = {
     "strategy_list": Arg(
         '--strategy-list',
         help='Provide a space-separated list of strategies to backtest. '
-        'Please note that ticker-interval needs to be set either in config '
+        'Please note that timeframe needs to be set either in config '
         'or via command line. When using this together with `--export trades`, '
         'the strategy-name is injected into the filename '
         '(so `backtest-data.json` becomes `backtest-data-SampleStrategy.json`',
@@ -176,11 +182,12 @@ AVAILABLE_CLI_OPTIONS = {
 
     ),
     "exportfilename": Arg(
-        '--export-filename',
-        help='Save backtest results to the file with this filename. '
-        'Requires `--export` to be set as well. '
-        'Example: `--export-filename=user_data/backtest_results/backtest_today.json`',
-        metavar='PATH',
+        "--export-filename",
+        "--backtest-filename",
+        help="Use this filename for backtest results."
+        "Requires `--export` to be set as well. "
+        "Example: `--export-filename=user_data/backtest_results/backtest_today.json`",
+        metavar="PATH",
     ),
     "disableparamexport": Arg(
         '--disable-param-export',
@@ -192,6 +199,18 @@ AVAILABLE_CLI_OPTIONS = {
         help='Specify fee ratio. Will be applied twice (on trade entry and exit).',
         type=float,
         metavar='FLOAT',
+    ),
+    "backtest_breakdown": Arg(
+        '--breakdown',
+        help='Show backtesting breakdown per [day, week, month].',
+        nargs='+',
+        choices=constants.BACKTEST_BREAKDOWNS
+    ),
+    "backtest_cache": Arg(
+        '--cache',
+        help='Load a cached backtest result no older than specified age (default: %(default)s).',
+        default=constants.BACKTEST_CACHE_DEFAULT,
+        choices=constants.BACKTEST_CACHE_AGE,
     ),
     # Edge
     "stoploss_range": Arg(
@@ -355,6 +374,11 @@ AVAILABLE_CLI_OPTIONS = {
         type=check_int_positive,
         metavar='INT',
     ),
+    "include_inactive": Arg(
+        '--include-inactive-pairs',
+        help='Also download data from inactive pairs.',
+        action='store_true',
+    ),
     "new_pairs_days": Arg(
         '--new-pairs-days',
         help='Download data of new pairs for given number of days. Default: `%(default)s`.',
@@ -413,6 +437,12 @@ AVAILABLE_CLI_OPTIONS = {
         help="Clean UI folder, don't download new version.",
         action='store_true',
         default=False,
+    ),
+    "ui_version": Arg(
+        '--ui-version',
+        help=('Specify a specific version of FreqUI to install. '
+              'Not specifying this installs the latest version.'),
+        type=str,
     ),
     # Templating options
     "template": Arg(
@@ -551,5 +581,11 @@ AVAILABLE_CLI_OPTIONS = {
         '--no-header',
         help='Do not print epoch details header.',
         action='store_true',
+    ),
+    "hyperopt_ignore_missing_space": Arg(
+        "--ignore-missing-spaces", "--ignore-unparameterized-spaces",
+        help=("Suppress errors for any requested Hyperopt spaces "
+              "that do not contain any parameters."),
+        action="store_true",
     ),
 }

@@ -18,6 +18,7 @@ from freqtrade.exceptions import OperationalException, StrategyError
 from freqtrade.exchange import timeframe_to_minutes, timeframe_to_seconds
 from freqtrade.exchange.exchange import timeframe_to_next_date
 from freqtrade.persistence import PairLocks, Trade
+from freqtrade.persistence.models import LocalTrade, Order
 from freqtrade.strategy.hyper import HyperStrategyMixin
 from freqtrade.strategy.informative_decorator import (InformativeData, PopulateIndicators,
                                                       _create_and_merge_informative_pair,
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 CUSTOM_SELL_MAX_LENGTH = 64
 
 
-class SellCheckTuple(object):
+class SellCheckTuple:
     """
     NamedTuple for Sell type + reason
     """
@@ -54,7 +55,7 @@ class IStrategy(ABC, HyperStrategyMixin):
     Attributes you can use:
         minimal_roi -> Dict: Minimal ROI designed for the strategy
         stoploss -> float: optimal stoploss designed for the strategy
-        timeframe -> str: value of the timeframe (ticker interval) to use with the strategy
+        timeframe -> str: value of the timeframe to use with the strategy
     """
     # Strategy interface version
     # Default to version 2
@@ -65,9 +66,9 @@ class IStrategy(ABC, HyperStrategyMixin):
     _populate_fun_len: int = 0
     _buy_fun_len: int = 0
     _sell_fun_len: int = 0
-    _ft_params_from_file: Dict = {}
+    _ft_params_from_file: Dict
     # associated minimal roi
-    minimal_roi: Dict
+    minimal_roi: Dict = {}
 
     # associated stoploss
     stoploss: float
@@ -80,7 +81,6 @@ class IStrategy(ABC, HyperStrategyMixin):
     use_custom_stoploss: bool = False
 
     # associated timeframe
-    ticker_interval: str  # DEPRECATED
     timeframe: str
 
     # Optional order types
@@ -105,6 +105,10 @@ class IStrategy(ABC, HyperStrategyMixin):
     sell_profit_only: bool
     sell_profit_offset: float
     ignore_roi_if_buy_signal: bool
+
+    # Position adjustment is disabled by default
+    position_adjustment_enable: bool = False
+    max_entry_position_adjustment: int = -1
 
     # Number of seconds after which the candle will no longer result in a buy on expired candles
     ignore_buying_expired_candle_after: int = 0
@@ -185,7 +189,17 @@ class IStrategy(ABC, HyperStrategyMixin):
         """
         return dataframe
 
-    def check_buy_timeout(self, pair: str, trade: Trade, order: dict, **kwargs) -> bool:
+    def bot_loop_start(self, **kwargs) -> None:
+        """
+        Called at the start of the bot iteration (one loop).
+        Might be used to perform pair-independent tasks
+        (e.g. gather some remote resource for comparison)
+        :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
+        """
+        pass
+
+    def check_buy_timeout(self, pair: str, trade: Trade, order: dict,
+                          current_time: datetime, **kwargs) -> bool:
         """
         Check buy timeout function callback.
         This method can be used to override the buy-timeout.
@@ -198,12 +212,14 @@ class IStrategy(ABC, HyperStrategyMixin):
         :param pair: Pair the trade is for
         :param trade: trade object.
         :param order: Order dictionary as returned from CCXT.
+        :param current_time: datetime object, containing the current datetime
         :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
         :return bool: When True is returned, then the buy-order is cancelled.
         """
         return False
 
-    def check_sell_timeout(self, pair: str, trade: Trade, order: dict, **kwargs) -> bool:
+    def check_sell_timeout(self, pair: str, trade: Trade, order: dict,
+                           current_time: datetime, **kwargs) -> bool:
         """
         Check sell timeout function callback.
         This method can be used to override the sell-timeout.
@@ -216,22 +232,15 @@ class IStrategy(ABC, HyperStrategyMixin):
         :param pair: Pair the trade is for
         :param trade: trade object.
         :param order: Order dictionary as returned from CCXT.
+        :param current_time: datetime object, containing the current datetime
         :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
         :return bool: When True is returned, then the sell-order is cancelled.
         """
         return False
 
-    def bot_loop_start(self, **kwargs) -> None:
-        """
-        Called at the start of the bot iteration (one loop).
-        Might be used to perform pair-independent tasks
-        (e.g. gather some remote resource for comparison)
-        :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
-        """
-        pass
-
     def confirm_trade_entry(self, pair: str, order_type: str, amount: float, rate: float,
-                            time_in_force: str, current_time: datetime, **kwargs) -> bool:
+                            time_in_force: str, current_time: datetime, entry_tag: Optional[str],
+                            **kwargs) -> bool:
         """
         Called right before placing a buy order.
         Timing for this function is critical, so avoid doing heavy computations or
@@ -247,6 +256,7 @@ class IStrategy(ABC, HyperStrategyMixin):
         :param rate: Rate that's going to be used when using limit orders
         :param time_in_force: Time in force. Defaults to GTC (Good-til-cancelled).
         :param current_time: datetime object, containing the current datetime
+        :param entry_tag: Optional entry_tag (buy_tag) if provided with the buy signal.
         :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
         :return bool: When True is returned, then the buy-order is placed on the exchange.
             False aborts the process
@@ -304,7 +314,7 @@ class IStrategy(ABC, HyperStrategyMixin):
         return self.stoploss
 
     def custom_entry_price(self, pair: str, current_time: datetime, proposed_rate: float,
-                           **kwargs) -> float:
+                           entry_tag: Optional[str], **kwargs) -> float:
         """
         Custom entry price logic, returning the new entry price.
 
@@ -315,6 +325,7 @@ class IStrategy(ABC, HyperStrategyMixin):
         :param pair: Pair that's currently analyzed
         :param current_time: datetime object, containing the current datetime
         :param proposed_rate: Rate, calculated based on pricing settings in ask_strategy.
+        :param entry_tag: Optional entry_tag (buy_tag) if provided with the buy signal.
         :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
         :return float: New entry price value if provided
         """
@@ -366,7 +377,7 @@ class IStrategy(ABC, HyperStrategyMixin):
 
     def custom_stake_amount(self, pair: str, current_time: datetime, current_rate: float,
                             proposed_stake: float, min_stake: float, max_stake: float,
-                            **kwargs) -> float:
+                            entry_tag: Optional[str], **kwargs) -> float:
         """
         Customize stake size for each new trade. This method is not called when edge module is
         enabled.
@@ -377,9 +388,33 @@ class IStrategy(ABC, HyperStrategyMixin):
         :param proposed_stake: A stake amount proposed by the bot.
         :param min_stake: Minimal stake size allowed by exchange.
         :param max_stake: Balance available for trading.
+        :param entry_tag: Optional entry_tag (buy_tag) if provided with the buy signal.
         :return: A stake size, which is between min_stake and max_stake.
         """
         return proposed_stake
+
+    def adjust_trade_position(self, trade: Trade, current_time: datetime,
+                              current_rate: float, current_profit: float, min_stake: float,
+                              max_stake: float, **kwargs) -> Optional[float]:
+        """
+        Custom trade adjustment logic, returning the stake amount that a trade should be increased.
+        This means extra buy orders with additional fees.
+        Only called when `position_adjustment_enable` is set to True.
+
+        For full documentation please go to https://www.freqtrade.io/en/latest/strategy-advanced/
+
+        When not implemented by a strategy, returns None
+
+        :param trade: trade object.
+        :param current_time: datetime object, containing the current datetime
+        :param current_rate: Current buy rate.
+        :param current_profit: Current profit (as ratio), calculated based on current_rate.
+        :param min_stake: Minimal stake size allowed by exchange.
+        :param max_stake: Balance available for trading.
+        :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
+        :return float: Stake amount to adjust your trade
+        """
+        return None
 
     def informative_pairs(self) -> ListPairsWithTimeframes:
         """
@@ -393,6 +428,12 @@ class IStrategy(ABC, HyperStrategyMixin):
                             ]
         """
         return []
+
+    def version(self) -> Optional[str]:
+        """
+        Returns version of the strategy.
+        """
+        return None
 
 ###
 # END - Intended to be overridden by strategy
@@ -442,6 +483,15 @@ class IStrategy(ABC, HyperStrategyMixin):
         :param pair: Unlock pair to allow trading again
         """
         PairLocks.unlock_pair(pair, datetime.now(timezone.utc))
+
+    def unlock_reason(self, reason: str) -> None:
+        """
+        Unlocks all pairs previously locked using lock_pair with specified reason.
+        Not used by freqtrade itself, but intended to be used if users lock pairs
+        manually from within the strategy, to allow an easy way to unlock pairs.
+        :param reason: Unlock pairs to allow trading again
+        """
+        PairLocks.unlock_reason(reason, datetime.now(timezone.utc))
 
     def is_pair_locked(self, pair: str, candle_date: datetime = None) -> bool:
         """
@@ -500,6 +550,7 @@ class IStrategy(ABC, HyperStrategyMixin):
             dataframe['buy'] = 0
             dataframe['sell'] = 0
             dataframe['buy_tag'] = None
+            dataframe['exit_tag'] = None
 
         # Other Defs in strategy that want to be called every loop here
         # twitter_sell = self.watch_twitter_feed(dataframe, metadata)
@@ -577,7 +628,7 @@ class IStrategy(ABC, HyperStrategyMixin):
         pair: str,
         timeframe: str,
         dataframe: DataFrame
-    ) -> Tuple[bool, bool, Optional[str]]:
+    ) -> Tuple[bool, bool, Optional[str], Optional[str]]:
         """
         Calculates current signal based based on the buy / sell columns of the dataframe.
         Used by Bot to get the signal to buy or sell
@@ -588,7 +639,7 @@ class IStrategy(ABC, HyperStrategyMixin):
         """
         if not isinstance(dataframe, DataFrame) or dataframe.empty:
             logger.warning(f'Empty candle (OHLCV) data for pair {pair}')
-            return False, False, None
+            return False, False, None, None
 
         latest_date = dataframe['date'].max()
         latest = dataframe.loc[dataframe['date'] == latest_date].iloc[-1]
@@ -603,7 +654,7 @@ class IStrategy(ABC, HyperStrategyMixin):
                 'Outdated history for pair %s. Last tick is %s minutes old',
                 pair, int((arrow.utcnow() - latest_date).total_seconds() // 60)
             )
-            return False, False, None
+            return False, False, None, None
 
         buy = latest[SignalType.BUY.value] == 1
 
@@ -612,6 +663,10 @@ class IStrategy(ABC, HyperStrategyMixin):
             sell = latest[SignalType.SELL.value] == 1
 
         buy_tag = latest.get(SignalTagType.BUY_TAG.value, None)
+        exit_tag = latest.get(SignalTagType.EXIT_TAG.value, None)
+        # Tags can be None, which does not resolve to False.
+        buy_tag = buy_tag if isinstance(buy_tag, str) else None
+        exit_tag = exit_tag if isinstance(exit_tag, str) else None
 
         logger.debug('trigger: %s (pair=%s) buy=%s sell=%s',
                      latest['date'], pair, str(buy), str(sell))
@@ -620,8 +675,8 @@ class IStrategy(ABC, HyperStrategyMixin):
                                       current_time=datetime.now(timezone.utc),
                                       timeframe_seconds=timeframe_seconds,
                                       buy=buy):
-            return False, sell, buy_tag
-        return buy, sell, buy_tag
+            return False, sell, buy_tag, exit_tag
+        return buy, sell, buy_tag, exit_tag
 
     def ignore_expired_candle(self, latest_date: datetime, current_time: datetime,
                               timeframe_seconds: int, buy: bool):
@@ -631,7 +686,7 @@ class IStrategy(ABC, HyperStrategyMixin):
         else:
             return False
 
-    def should_sell(self, trade: Trade, rate: float, date: datetime, buy: bool,
+    def should_sell(self, trade: Trade, rate: float, current_time: datetime, buy: bool,
                     sell: bool, low: float = None, high: float = None,
                     force_stoploss: float = 0) -> SellCheckTuple:
         """
@@ -648,7 +703,8 @@ class IStrategy(ABC, HyperStrategyMixin):
         trade.adjust_min_max_rates(high or current_rate, low or current_rate)
 
         stoplossflag = self.stop_loss_reached(current_rate=current_rate, trade=trade,
-                                              current_time=date, current_profit=current_profit,
+                                              current_time=current_time,
+                                              current_profit=current_profit,
                                               force_stoploss=force_stoploss, low=low, high=high)
 
         # Set current rate to high for backtesting sell
@@ -658,7 +714,7 @@ class IStrategy(ABC, HyperStrategyMixin):
         # if buy signal and ignore_roi is set, we don't need to evaluate min_roi.
         roi_reached = (not (buy and self.ignore_roi_if_buy_signal)
                        and self.min_roi_reached(trade=trade, current_profit=current_profit,
-                                                current_time=date))
+                                                current_time=current_time))
 
         sell_signal = SellType.NONE
         custom_reason = ''
@@ -675,8 +731,8 @@ class IStrategy(ABC, HyperStrategyMixin):
                 sell_signal = SellType.SELL_SIGNAL
             else:
                 custom_reason = strategy_safe_wrapper(self.custom_sell, default_retval=False)(
-                    pair=trade.pair, trade=trade, current_time=date, current_rate=current_rate,
-                    current_profit=current_profit)
+                    pair=trade.pair, trade=trade, current_time=current_time,
+                    current_rate=current_rate, current_profit=current_profit)
                 if custom_reason:
                     sell_signal = SellType.CUSTOM_SELL
                     if isinstance(custom_reason, str):
@@ -687,22 +743,20 @@ class IStrategy(ABC, HyperStrategyMixin):
                             custom_reason = custom_reason[:CUSTOM_SELL_MAX_LENGTH]
                     else:
                         custom_reason = None
-            # TODO: return here if sell-signal should be favored over ROI
+            if sell_signal in (SellType.CUSTOM_SELL, SellType.SELL_SIGNAL):
+                logger.debug(f"{trade.pair} - Sell signal received. "
+                             f"sell_type=SellType.{sell_signal.name}" +
+                             (f", custom_reason={custom_reason}" if custom_reason else ""))
+                return SellCheckTuple(sell_type=sell_signal, sell_reason=custom_reason)
 
         # Start evaluations
         # Sequence:
-        # ROI (if not stoploss)
         # Sell-signal
+        # ROI (if not stoploss)
         # Stoploss
         if roi_reached and stoplossflag.sell_type != SellType.STOP_LOSS:
             logger.debug(f"{trade.pair} - Required profit reached. sell_type=SellType.ROI")
             return SellCheckTuple(sell_type=SellType.ROI)
-
-        if sell_signal != SellType.NONE:
-            logger.debug(f"{trade.pair} - Sell signal received. "
-                         f"sell_type=SellType.{sell_signal.name}" +
-                         (f", custom_reason={custom_reason}" if custom_reason else ""))
-            return SellCheckTuple(sell_type=sell_signal, sell_reason=custom_reason)
 
         if stoplossflag.sell_flag:
 
@@ -755,7 +809,7 @@ class IStrategy(ABC, HyperStrategyMixin):
                 if self.trailing_stop_positive is not None and high_profit > sl_offset:
                     stop_loss_value = self.trailing_stop_positive
                     logger.debug(f"{trade.pair} - Using positive stoploss: {stop_loss_value} "
-                                 f"offset: {sl_offset:.4g} profit: {current_profit:.4f}%")
+                                 f"offset: {sl_offset:.4g} profit: {current_profit:.2%}")
 
                 trade.adjust_stop_loss(high or current_rate, stop_loss_value)
 
@@ -809,6 +863,28 @@ class IStrategy(ABC, HyperStrategyMixin):
             return False
         else:
             return current_profit > roi
+
+    def ft_check_timed_out(self, side: str, trade: LocalTrade, order: Order,
+                           current_time: datetime) -> bool:
+        """
+        FT Internal method.
+        Check if timeout is active, and if the order is still open and timed out
+        """
+        timeout = self.config.get('unfilledtimeout', {}).get(side)
+        if timeout is not None:
+            timeout_unit = self.config.get('unfilledtimeout', {}).get('unit', 'minutes')
+            timeout_kwargs = {timeout_unit: -timeout}
+            timeout_threshold = current_time + timedelta(**timeout_kwargs)
+            timedout = (order.status == 'open' and order.side == side
+                        and order.order_date_utc < timeout_threshold)
+            if timedout:
+                return True
+        time_method = self.check_sell_timeout if order.side == 'sell' else self.check_buy_timeout
+
+        return strategy_safe_wrapper(time_method,
+                                     default_retval=False)(
+                                        pair=trade.pair, trade=trade, order=order,
+                                        current_time=current_time)
 
     def advise_all_indicators(self, data: Dict[str, DataFrame]) -> Dict[str, DataFrame]:
         """

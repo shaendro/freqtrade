@@ -45,28 +45,24 @@ class StrategyResolver(IResolver):
             strategy_name, config=config,
             extra_dir=config.get('strategy_path'))
 
-        if hasattr(strategy, 'ticker_interval') and not hasattr(strategy, 'timeframe'):
-            # Assign ticker_interval to timeframe to keep compatibility
-            if 'timeframe' not in config:
-                logger.warning(
-                    "DEPRECATED: Please migrate to using 'timeframe' instead of 'ticker_interval'."
-                )
-                strategy.timeframe = strategy.ticker_interval
-
         if strategy._ft_params_from_file:
             # Set parameters from Hyperopt results file
             params = strategy._ft_params_from_file
-            strategy.minimal_roi = params.get('roi', strategy.minimal_roi)
+            strategy.minimal_roi = params.get('roi', getattr(strategy, 'minimal_roi', {}))
 
-            strategy.stoploss = params.get('stoploss', {}).get('stoploss', strategy.stoploss)
+            strategy.stoploss = params.get('stoploss', {}).get(
+                'stoploss', getattr(strategy, 'stoploss', -0.1))
             trailing = params.get('trailing', {})
-            strategy.trailing_stop = trailing.get('trailing_stop', strategy.trailing_stop)
-            strategy.trailing_stop_positive = trailing.get('trailing_stop_positive',
-                                                           strategy.trailing_stop_positive)
+            strategy.trailing_stop = trailing.get(
+                'trailing_stop', getattr(strategy, 'trailing_stop', False))
+            strategy.trailing_stop_positive = trailing.get(
+                'trailing_stop_positive', getattr(strategy, 'trailing_stop_positive', None))
             strategy.trailing_stop_positive_offset = trailing.get(
-                'trailing_stop_positive_offset', strategy.trailing_stop_positive_offset)
+                'trailing_stop_positive_offset',
+                getattr(strategy, 'trailing_stop_positive_offset', 0))
             strategy.trailing_only_offset_is_reached = trailing.get(
-                'trailing_only_offset_is_reached', strategy.trailing_only_offset_is_reached)
+                'trailing_only_offset_is_reached',
+                getattr(strategy, 'trailing_only_offset_is_reached', 0.0))
 
         # Set attributes
         # Check if we need to override configuration
@@ -92,7 +88,9 @@ class StrategyResolver(IResolver):
                       ("ignore_roi_if_buy_signal",        False),
                       ("sell_profit_offset",              0.0),
                       ("disable_dataframe_checks",        False),
-                      ("ignore_buying_expired_candle_after",  0)
+                      ("ignore_buying_expired_candle_after",  0),
+                      ("position_adjustment_enable",      False),
+                      ("max_entry_position_adjustment",      -1),
                       ]
         for attribute, default in attributes:
             StrategyResolver._override_attribute_helper(strategy, config,
@@ -139,10 +137,6 @@ class StrategyResolver(IResolver):
         """
         Normalize attributes to have the correct type.
         """
-        # Assign deprecated variable - to not break users code relying on this.
-        if hasattr(strategy, 'timeframe'):
-            strategy.ticker_interval = strategy.timeframe
-
         # Sort and apply type conversions
         if hasattr(strategy, 'minimal_roi'):
             strategy.minimal_roi = dict(sorted(

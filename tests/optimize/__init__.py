@@ -36,6 +36,8 @@ class BTContainer(NamedTuple):
     trailing_stop_positive_offset: float = 0.0
     use_sell_signal: bool = False
     use_custom_stoploss: bool = False
+    custom_entry_price: Optional[float] = None
+    custom_exit_price: Optional[float] = None
 
 
 def _get_frame_time_from_offset(offset):
@@ -54,4 +56,12 @@ def _build_backtest_dataframe(data):
         frame[column] = frame[column].astype('float64')
     if 'buy_tag' not in columns:
         frame['buy_tag'] = None
+    if 'exit_tag' not in columns:
+        frame['exit_tag'] = None
+
+    # Ensure all candles make kindof sense
+    assert all(frame['low'] <= frame['close'])
+    assert all(frame['low'] <= frame['open'])
+    assert all(frame['high'] >= frame['close'])
+    assert all(frame['high'] >= frame['open'])
     return frame

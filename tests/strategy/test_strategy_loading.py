@@ -62,8 +62,8 @@ def test_load_strategy(default_conf, result):
 
 
 def test_load_strategy_base64(result, caplog, default_conf):
-    with (Path(__file__).parents[2] / 'freqtrade/templates/sample_strategy.py').open("rb") as file:
-        encoded_string = urlsafe_b64encode(file.read()).decode("utf-8")
+    filepath = Path(__file__).parents[2] / 'freqtrade/templates/sample_strategy.py'
+    encoded_string = urlsafe_b64encode(filepath.read_bytes()).decode("utf-8")
     default_conf.update({'strategy': 'SampleStrategy:{}'.format(encoded_string)})
 
     strategy = StrategyResolver.load_strategy(default_conf)
@@ -111,7 +111,6 @@ def test_strategy(result, default_conf):
     assert default_conf['stoploss'] == -0.10
 
     assert strategy.timeframe == '5m'
-    assert strategy.ticker_interval == '5m'
     assert default_conf['timeframe'] == '5m'
 
     df_indicators = strategy.advise_indicators(result, metadata=metadata)
@@ -376,7 +375,6 @@ def test_call_deprecated_function(result, monkeypatch, default_conf, caplog):
     assert strategy._sell_fun_len == 2
     assert strategy.INTERFACE_VERSION == 1
     assert strategy.timeframe == '5m'
-    assert strategy.ticker_interval == '5m'
 
     indicator_df = strategy.advise_indicators(result, metadata=metadata)
     assert isinstance(indicator_df, DataFrame)
@@ -389,9 +387,6 @@ def test_call_deprecated_function(result, monkeypatch, default_conf, caplog):
     selldf = strategy.advise_sell(result, metadata=metadata)
     assert isinstance(selldf, DataFrame)
     assert 'sell' in selldf
-
-    assert log_has("DEPRECATED: Please migrate to using 'timeframe' instead of 'ticker_interval'.",
-                   caplog)
 
 
 def test_strategy_interface_versioning(result, monkeypatch, default_conf):

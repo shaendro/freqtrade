@@ -30,28 +30,51 @@ _STRATEGY = StrategyTestV2(config={})
 _STRATEGY.dp = DataProvider({}, None, None)
 
 
-def test_returns_latest_signal(mocker, default_conf, ohlcv_history):
+def test_returns_latest_signal(ohlcv_history):
     ohlcv_history.loc[1, 'date'] = arrow.utcnow()
     # Take a copy to correctly modify the call
     mocked_history = ohlcv_history.copy()
     mocked_history['sell'] = 0
     mocked_history['buy'] = 0
+    # Set tags in lines that don't matter to test nan in the sell line
+    mocked_history.loc[0, 'buy_tag'] = 'wrong_line'
+    mocked_history.loc[0, 'exit_tag'] = 'wrong_line'
+
     mocked_history.loc[1, 'sell'] = 1
 
-    assert _STRATEGY.get_signal('ETH/BTC', '5m', mocked_history) == (False, True, None)
+    assert _STRATEGY.get_signal('ETH/BTC', '5m', mocked_history) == (False, True, None, None)
     mocked_history.loc[1, 'sell'] = 0
     mocked_history.loc[1, 'buy'] = 1
 
-    assert _STRATEGY.get_signal('ETH/BTC', '5m', mocked_history) == (True, False, None)
+    assert _STRATEGY.get_signal('ETH/BTC', '5m', mocked_history) == (True, False, None, None)
     mocked_history.loc[1, 'sell'] = 0
     mocked_history.loc[1, 'buy'] = 0
 
-    assert _STRATEGY.get_signal('ETH/BTC', '5m', mocked_history) == (False, False, None)
+    assert _STRATEGY.get_signal('ETH/BTC', '5m', mocked_history) == (False, False, None, None)
     mocked_history.loc[1, 'sell'] = 0
     mocked_history.loc[1, 'buy'] = 1
     mocked_history.loc[1, 'buy_tag'] = 'buy_signal_01'
 
-    assert _STRATEGY.get_signal('ETH/BTC', '5m', mocked_history) == (True, False, 'buy_signal_01')
+    assert _STRATEGY.get_signal(
+        'ETH/BTC',
+        '5m',
+        mocked_history) == (
+        True,
+        False,
+        'buy_signal_01',
+        None)
+
+    mocked_history.loc[1, 'buy_tag'] = None
+    mocked_history.loc[1, 'exit_tag'] = 'sell_signal_01'
+
+    assert _STRATEGY.get_signal(
+        'ETH/BTC',
+        '5m',
+        mocked_history) == (
+        True,
+        False,
+        None,
+        'sell_signal_01')
 
 
 def test_analyze_pair_empty(default_conf, mocker, caplog, ohlcv_history):
@@ -68,17 +91,24 @@ def test_analyze_pair_empty(default_conf, mocker, caplog, ohlcv_history):
 
 
 def test_get_signal_empty(default_conf, mocker, caplog):
-    assert (False, False, None) == _STRATEGY.get_signal(
+    assert (False, False, None, None) == _STRATEGY.get_signal(
         'foo', default_conf['timeframe'], DataFrame()
     )
     assert log_has('Empty candle (OHLCV) data for pair foo', caplog)
     caplog.clear()
 
-    assert (False, False, None) == _STRATEGY.get_signal('bar', default_conf['timeframe'], None)
+    assert (
+        False,
+        False,
+        None,
+        None) == _STRATEGY.get_signal(
+        'bar',
+        default_conf['timeframe'],
+        None)
     assert log_has('Empty candle (OHLCV) data for pair bar', caplog)
     caplog.clear()
 
-    assert (False, False, None) == _STRATEGY.get_signal(
+    assert (False, False, None, None) == _STRATEGY.get_signal(
         'baz',
         default_conf['timeframe'],
         DataFrame([])
@@ -118,7 +148,7 @@ def test_get_signal_old_dataframe(default_conf, mocker, caplog, ohlcv_history):
     caplog.set_level(logging.INFO)
     mocker.patch.object(_STRATEGY, 'assert_df')
 
-    assert (False, False, None) == _STRATEGY.get_signal(
+    assert (False, False, None, None) == _STRATEGY.get_signal(
         'xyz',
         default_conf['timeframe'],
         mocked_history
@@ -140,7 +170,7 @@ def test_get_signal_no_sell_column(default_conf, mocker, caplog, ohlcv_history):
     caplog.set_level(logging.INFO)
     mocker.patch.object(_STRATEGY, 'assert_df')
 
-    assert (True, False, None) == _STRATEGY.get_signal(
+    assert (True, False, None, None) == _STRATEGY.get_signal(
         'xyz',
         default_conf['timeframe'],
         mocked_history
@@ -407,7 +437,8 @@ def test_stop_loss_reached(default_conf, fee, profit, adjusted, expected, traili
         strategy.custom_stoploss = custom_stop
 
     now = arrow.utcnow().datetime
-    sl_flag = strategy.stop_loss_reached(current_rate=trade.open_rate * (1 + profit), trade=trade,
+    current_rate = trade.open_rate * (1 + profit)
+    sl_flag = strategy.stop_loss_reached(current_rate=current_rate, trade=trade,
                                          current_time=now, current_profit=profit,
                                          force_stoploss=0, high=None)
     assert isinstance(sl_flag, SellCheckTuple)
@@ -417,8 +448,9 @@ def test_stop_loss_reached(default_conf, fee, profit, adjusted, expected, traili
     else:
         assert sl_flag.sell_flag is True
     assert round(trade.stop_loss, 2) == adjusted
+    current_rate2 = trade.open_rate * (1 + profit2)
 
-    sl_flag = strategy.stop_loss_reached(current_rate=trade.open_rate * (1 + profit2), trade=trade,
+    sl_flag = strategy.stop_loss_reached(current_rate=current_rate2, trade=trade,
                                          current_time=now, current_profit=profit2,
                                          force_stoploss=0, high=None)
     assert sl_flag.sell_type == expected2
@@ -575,6 +607,13 @@ def test_is_pair_locked(default_conf):
     strategy.unlock_pair(pair)
     assert not strategy.is_pair_locked(pair)
 
+    # Lock with reason
+    reason = "TestLockR"
+    strategy.lock_pair(pair, arrow.now(timezone.utc).shift(minutes=4).datetime, reason)
+    assert strategy.is_pair_locked(pair)
+    strategy.unlock_reason(reason)
+    assert not strategy.is_pair_locked(pair)
+
     pair = 'BTC/USDT'
     # Lock until 14:30
     lock_time = datetime(2020, 5, 1, 14, 30, 0, tzinfo=timezone.utc)
@@ -646,7 +685,7 @@ def test_strategy_safe_wrapper(value):
 
     ret = strategy_safe_wrapper(working_method, message='DeadBeef')(value)
 
-    assert type(ret) == type(value)
+    assert isinstance(ret, type(value))
     assert ret == value
 
 
